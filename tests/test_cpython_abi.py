@@ -9,6 +9,7 @@ def test_abi3_tag_detection():
     assert has_abi3_tag("foo.abi3.so") is True
     assert has_abi3_tag("foo.abi3.pyd") is True
     assert has_abi3_tag("foo.cpython-311-x86_64-linux-gnu.so") is False
+    assert has_abi3_tag("foo.cp314-win_amd64.pyd") is False
     assert has_abi3_tag("foo.so") is False
 
 

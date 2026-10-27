@@ -1,13 +1,143 @@
-"""Extract undefined dynamic symbols from compiled extension modules."""
+"""Read the imported and exported symbol names from compiled libraries.
+
+Two backends, picked by the file's own magic bytes rather than the host OS:
+
+* **PE/COFF** (Windows ``.pyd`` / ``.dll``) — ``dumpbin`` when it is on PATH
+  (only inside a Visual Studio developer prompt), otherwise the built-in
+  parser in :mod:`.pe`. Neither route needs Windows, so Windows wheels can be
+  audited from macOS or Linux too.
+* **ELF / Mach-O** — ``nm`` from binutils / Xcode Command Line Tools.
+
+Sniffing the file means a given library is reported the same way regardless of
+where the tool runs; an unrecognised format falls back to ``nm``, which is the
+historical behaviour.
+
+Callers ask for the same library twice (once to classify it as an extension
+module, once to inspect it), so results are memoised on the stat signature —
+PE images shipped by torch reach hundreds of megabytes.
+"""
 
 from __future__ import annotations
 
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
+from . import dumpbin, pe
 from .demangle import demangle_symbol
+
+#: Suffixes treated as compiled libraries, across the platforms we audit.
+LIBRARY_SUFFIXES = (".so", ".pyd", ".dylib", ".dll")
+
+_ELF_MAGIC = b"\x7fELF"
+_MACHO_MAGICS = frozenset(
+    {
+        b"\xfe\xed\xfa\xce",  # 32-bit big-endian
+        b"\xce\xfa\xed\xfe",  # 32-bit little-endian
+        b"\xfe\xed\xfa\xcf",  # 64-bit big-endian
+        b"\xcf\xfa\xed\xfe",  # 64-bit little-endian
+        b"\xca\xfe\xba\xbe",  # universal (fat) binary
+        b"\xbe\xba\xfe\xca",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class BinarySymbols:
+    """Symbol names read from one compiled library.
+
+    ``imports`` are references to symbols defined outside the library — the
+    ELF dynamic symbol table's undefined entries, or the PE import directory —
+    already demangled. ``exports`` are the names the library defines, left
+    undemangled: they are only used to spot Python module entry points, which
+    are plain C names.
+    """
+
+    imports: tuple[str, ...] = ()
+    exports: tuple[str, ...] = ()
+
+
+def read_symbols(path: Path) -> BinarySymbols:
+    """Read the symbol tables of ``path``.
+
+    Empty when the file cannot be read, mirroring ``nm``'s leniency for files
+    that aren't recognised object files.
+    """
+    p = Path(path)
+    try:
+        stat = p.stat()
+    except OSError:
+        return BinarySymbols()
+    return _read_symbols_cached(str(p), stat.st_size, stat.st_mtime_ns)
+
+
+@lru_cache(maxsize=64)
+def _read_symbols_cached(path: str, _size: int, _mtime_ns: int) -> BinarySymbols:
+    p = Path(path)
+    try:
+        file_format = _file_format(p)
+    except OSError:
+        return BinarySymbols()
+    if file_format == "pe":
+        return _read_pe(p)
+    return _read_nm(p)
+
+
+def _file_format(path: Path) -> str | None:
+    """Sniff the container format from the leading magic bytes."""
+    with path.open("rb") as f:
+        head = f.read(4)
+    if head.startswith(b"MZ"):
+        return "pe"
+    if head == _ELF_MAGIC:
+        return "elf"
+    if head in _MACHO_MAGICS:
+        return "macho"
+    return None
+
+
+def _read_pe(path: Path) -> BinarySymbols:
+    imports, exports = _pe_names(path)
+    return BinarySymbols(
+        imports=tuple(demangle_symbol(name) for name in imports),
+        exports=exports,
+    )
+
+
+def _pe_names(path: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Import and export names of one PE image.
+
+    ``dumpbin`` wins when it is on PATH, mirroring the ``nm``-first behaviour on
+    ELF/Mach-O; the built-in parser covers ordinary installs, where no Visual
+    Studio prompt is active, and every non-Windows host.
+
+    A failed, partial or empty ``dumpbin`` run falls through to the parser
+    rather than reporting an empty table: a silently clean verdict is worse than
+    paying a few milliseconds, and it keeps the audit stable if a dumpbin
+    release rewords its output. (dumpbin is also 10-230x slower, so the fallback
+    is the path most users take.)
+    """
+    if dumpbin.find_dumpbin():
+        try:
+            names = dumpbin.read_dumpbin(path)
+        except (dumpbin.DumpbinError, OSError):
+            pass
+        else:
+            # Both tables must have parsed. A reworded dumpbin release (or a
+            # partially readable directory) can yield names for one table and
+            # nothing for the other; trusting that would silently demote an
+            # extension module to a bundled library, because entry-point
+            # detection reads only ``exports``. Re-parsing costs milliseconds,
+            # and a genuinely export-less image gets the same answer either way.
+            if all(names):
+                return names
+    try:
+        return pe.read_pe(path)
+    except (pe.PEFormatError, OSError):
+        return (), ()
 
 
 def _nm_command(path: Path) -> list[str]:
@@ -30,24 +160,19 @@ def _nm_command(path: Path) -> list[str]:
     return ["nm", f"-{flags}", str(path)]
 
 
-def extract_undefined_symbols(path: Path) -> list[str]:
-    """Return demangled undefined symbols from ``path``.
-
-    Empty list if nm errors out (e.g. the file isn't a recognised object file).
-    """
-    if sys.platform == "win32":
-        raise RuntimeError(
-            "Windows is not yet supported (PE/COFF parsing via dumpbin is not implemented)"
-        )
+def _read_nm(path: Path) -> BinarySymbols:
     if not shutil.which("nm"):
         hint = "Xcode Command Line Tools" if sys.platform == "darwin" else "binutils"
         raise RuntimeError(f"'nm' not found in PATH (install {hint})")
+    return BinarySymbols(imports=_nm_imports(path), exports=_nm_exports(path))
 
+
+def _nm_imports(path: Path) -> tuple[str, ...]:
     proc = subprocess.run(
         _nm_command(path), capture_output=True, text=True, check=False,
     )
     if proc.returncode != 0 and not proc.stdout:
-        return []
+        return ()
 
     symbols: list[str] = []
     on_darwin = sys.platform == "darwin"
@@ -61,7 +186,39 @@ def extract_undefined_symbols(path: Path) -> list[str]:
         if on_darwin and sym.startswith("_"):
             sym = sym[1:]
         symbols.append(demangle_symbol(sym))
-    return symbols
+    return tuple(symbols)
+
+
+def _nm_exports(path: Path) -> tuple[str, ...]:
+    """Defined external symbols, via the same nm binary.
+
+    On macOS Mach-O there is one symbol table, so ``-g`` shows external
+    symbols; on Linux we want exported dynamic symbols, so ``-D``.
+    """
+    args = (
+        ["nm", "-g", str(path)]
+        if sys.platform == "darwin"
+        else ["nm", "-D", str(path)]
+    )
+    proc = subprocess.run(args, capture_output=True, text=True, check=False)
+    if proc.returncode != 0 and not proc.stdout:
+        return ()
+    names: list[str] = []
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        # Defined symbols have 3 tokens: "<addr> <type> <name>".
+        # Undefined have 2: "U <name>" — those won't satisfy len >= 3.
+        if len(parts) >= 3:
+            names.append(parts[-1])
+    return tuple(names)
+
+
+def extract_undefined_symbols(path: Path) -> list[str]:
+    """Return demangled undefined symbols from ``path``.
+
+    Empty list if the file isn't a recognised object file (or can't be read).
+    """
+    return list(read_symbols(path).imports)
 
 
 _MODULE_ENTRYPOINT_PREFIXES = (
@@ -82,23 +239,14 @@ def has_module_entrypoint(path: Path) -> bool:
     """Return True if ``path`` defines a Python module entry point.
 
     Recognises the classic ``PyInit_*`` hook and the PEP 793 ``PyModExport_*``
-    hook (plus their ``*U_`` non-ASCII variants). On macOS Mach-O there is one
-    symbol table; ``-g`` shows external symbols. On Linux we want exported
-    dynamic symbols, so ``-D``.
+    hook (plus their ``*U_`` non-ASCII variants), looking at the library's
+    exported names.
     """
-    if not shutil.which("nm"):
+    try:
+        symbols = read_symbols(path)
+    except RuntimeError:
         return False
-    args = ["nm", "-g", str(path)] if sys.platform == "darwin" else ["nm", "-D", str(path)]
-    proc = subprocess.run(args, capture_output=True, text=True, check=False)
-    if proc.returncode != 0 and not proc.stdout:
-        return False
-    for line in proc.stdout.splitlines():
-        parts = line.split()
-        # Defined symbols have 3 tokens: "<addr> <type> <name>".
-        # Undefined have 2: "U <name>" — those won't satisfy len >= 3.
-        if len(parts) >= 3 and is_module_entrypoint(parts[-1]):
-            return True
-    return False
+    return any(is_module_entrypoint(name) for name in symbols.exports)
 
 
 def is_extension_module(path: Path) -> bool:
@@ -112,21 +260,22 @@ def is_extension_module(path: Path) -> bool:
     """
     if not path.is_file():
         return False
-    if not path.name.endswith((".so", ".pyd", ".dylib")):
+    if not path.name.endswith(LIBRARY_SUFFIXES):
         return False
     return has_module_entrypoint(path)
 
 
 def find_compiled_libraries(directory: Path) -> list[Path]:
-    """Recursively find every ``.so`` / ``.pyd`` / ``.dylib`` under ``directory``.
+    """Recursively find every compiled library under ``directory``.
 
-    Includes both Python extension modules and bundled internal shared
+    Matches :data:`LIBRARY_SUFFIXES` — ``.so``, ``.pyd``, ``.dylib`` and
+    ``.dll``. Includes both Python extension modules and bundled internal shared
     libraries (e.g. ``torch/lib/libtorch_cpu.so``,
-    ``torchcodec/libtorchcodec_core8.so``) — callers split the two via
-    :func:`is_extension_module`.
+    ``torchcodec/libtorchcodec_core8.so``, ``torch/lib/torch_cpu.dll``) —
+    callers split the two via :func:`is_extension_module`.
     """
     out: set[Path] = set()
-    for ext in ("*.so", "*.pyd", "*.dylib"):
+    for ext in ("*" + suffix for suffix in LIBRARY_SUFFIXES):
         for p in directory.rglob(ext):
             if p.is_file():
                 out.add(p)

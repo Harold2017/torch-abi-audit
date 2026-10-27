@@ -9,6 +9,7 @@ from pathlib import Path
 from . import cpython_abi, torch_abi
 from .report import EnvironmentReport, ExtensionReport, PackageReport
 from .symbols import (
+    LIBRARY_SUFFIXES,
     extract_undefined_symbols,
     find_compiled_libraries,
     is_extension_module,
@@ -77,7 +78,7 @@ def inspect_package(name_or_path: str | Path) -> PackageReport:
         name = str(name_or_path)
 
     if target.is_file():
-        if not target.name.endswith((".so", ".pyd", ".dylib")):
+        if not target.name.endswith(LIBRARY_SUFFIXES):
             return PackageReport(
                 name=name,
                 root=target.parent,
@@ -131,7 +132,7 @@ def inspect_site_packages(directory: Path | None = None) -> EnvironmentReport:
                     bundled_libs=bundled,
                 )
             )
-        elif entry.is_file() and entry.name.endswith((".so", ".pyd", ".dylib")):
+        elif entry.is_file() and entry.name.endswith(LIBRARY_SUFFIXES):
             report = inspect_extension(entry)
             if is_extension_module(entry):
                 packages.append(

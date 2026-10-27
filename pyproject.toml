@@ -64,6 +64,7 @@ include = [
 [tool.pyrefly]
 project-includes = ["src", "tests"]
 python-version = "3.11"
+search-path = ["tests"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
