@@ -62,8 +62,13 @@ equivalent yet — this fills that gap, and handles both checks in one pass.
 pip install torch-abi-audit
 ```
 
-Linux and macOS only. Windows support requires a `dumpbin`-based backend that
-isn't implemented yet.
+Linux, macOS and Windows. On Windows, PE import/export tables are read by a
+built-in parser, so no extra tooling is needed. `dumpbin` is used when it is on
+`PATH` — which only happens inside a Visual Studio developer prompt — and is
+never required.
+
+Any platform's binaries can be audited from any host, so a `win_amd64` wheel can
+be inspected on Linux.
 
 ## Quick tour
 
@@ -71,7 +76,7 @@ isn't implemented yet.
 # Inspect a single installed package by import name
 torch-abi-audit torchaudio
 
-# Or by path to its install directory or a single .so
+# Or by path to its install directory or a single .so / .pyd / .dll
 torch-abi-audit /path/to/site-packages/torchaudio
 
 # Whole-environment scan (active interpreter)
@@ -88,14 +93,18 @@ stable surface, and as `UNSTABLE` if any `c10::*`, `at::*`, or non-stable
 
 ## How it works
 
-1. Walk the target directory and collect every `.so` / `.pyd` / `.dylib`.
+1. Walk the target directory and collect every `.so` / `.pyd` / `.dylib` /
+   `.dll`.
    Bucket each by whether it defines a `PyInit_*` symbol — Python extension
    modules go under `extensions`, internal bundled libraries (e.g.
-   `torch/lib/libtorch_python.so`, or torchaudio's stable plugins loaded
-   via `STABLE_TORCH_LIBRARY`) go under `bundled_libs`. Both buckets count
-   toward the PyTorch verdict; only `extensions` count toward the CPython
-   ABI verdict.
-2. Run `nm -uD` (Linux) or `nm -u` (macOS) to extract undefined symbols.
+   `torch/lib/libtorch_python.so`, `torch/lib/torch_cpu.dll`, or torchaudio's
+   stable plugins loaded via `STABLE_TORCH_LIBRARY`) go under `bundled_libs`.
+   Both buckets count toward the PyTorch verdict; only `extensions` count
+   toward the CPython ABI verdict.
+2. Read the undefined symbols: `nm -uD` on Linux, `nm -u` on macOS, or the PE
+   import directory on Windows (`dumpbin` when it is on `PATH`, otherwise the
+   built-in parser). The format is detected from the file itself, not the host,
+   so cross-platform wheels audit correctly anywhere.
 3. Demangle C++ names via [pycxxfilt](https://pypi.org/project/pycxxfilt/).
 4. Classify each symbol against two rule sets — the CPython stable-ABI
    symbol set from [abi3info](https://pypi.org/project/abi3info/) and the

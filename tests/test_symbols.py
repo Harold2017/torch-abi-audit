@@ -130,3 +130,26 @@ def test_extract_undefined_symbols_strips_macos_prefix(cpython_stable_so: Path):
     # Known stable data symbols look like "_Py_NoneStruct" with exactly one
     # underscore. Anything starting with two is a Mach-O artifact we failed to strip.
     assert bad == [], f"unstripped Mach-O underscores: {bad[:5]}"
+
+
+def test_torch_stable_fixture_is_classified_stable(torch_stable_so: Path):
+    """A real binary built against the stable C shim only.
+
+    Skips when torch isn't importable, which is the case on CI.
+    """
+    report = inspect_package(torch_stable_so)
+
+    assert report.extensions == ()
+    (lib,) = report.bundled_libs
+    assert lib.torch.uses_torch is True
+    assert lib.torch.stable is True
+    assert lib.torch.min_torch_version is not None
+
+
+def test_torch_unstable_fixture_is_classified_unstable(torch_unstable_so: Path):
+    report = inspect_package(torch_unstable_so)
+
+    (lib,) = report.bundled_libs
+    assert lib.torch.uses_torch is True
+    assert lib.torch.stable is False
+    assert any("at::" in sym for sym in lib.torch.unstable_symbols)

@@ -24,7 +24,7 @@ A `TARGET` can be:
 
 - An importable name like `torchvision` — resolved via `importlib.util.find_spec`.
 - A path to an installed package directory (recursive scan).
-- A path to a single `.so` / `.pyd` / `.dylib` file.
+- A path to a single `.so` / `.pyd` / `.dylib` / `.dll` file.
 
 ## Output
 

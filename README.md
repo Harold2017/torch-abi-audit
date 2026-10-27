@@ -3,10 +3,10 @@
 Audit Python extension modules for compliance with the
 [PyTorch Stable ABI](https://docs.pytorch.org/docs/main/notes/libtorch_stable_abi.html)
 (`aoti_torch_*` C shim and `torch::stable::*` / `torch::headeronly::*` C++
-wrappers, introduced in PyTorch 2.9). Walks every `.so` shipped in a
-package — both Python extension modules and bundled internal libraries —
-and reports which stick to the stable surface and which reach into
-`at::` / `c10::` / `torch::jit::` internals.
+wrappers, introduced in PyTorch 2.9). Walks every compiled library shipped in a
+package — `.so` / `.pyd` / `.dylib` / `.dll`, covering both Python extension
+modules and bundled internal libraries — and reports which stick to the stable
+surface and which reach into `at::` / `c10::` / `torch::jit::` internals.
 
 The audit also reports the **minimum torch version** each library needs: every
 `aoti_torch_*` / `torch_*` C-shim entry point was introduced in some release,
@@ -26,7 +26,11 @@ compliance, since the data is right there.
 pip install torch-abi-audit
 ```
 
-Linux and macOS only for now (Windows requires `dumpbin` support — not yet implemented).
+Linux, macOS and Windows. On Windows the PE import/export tables are read by a
+built-in parser, so nothing extra is needed; `dumpbin` is used when it happens
+to be on `PATH` (inside a Visual Studio developer prompt). Any platform's
+binaries can be audited from any host — a `win_amd64` wheel can be checked on
+Linux, for example.
 
 ## CLI usage
 
@@ -34,7 +38,7 @@ Linux and macOS only for now (Windows requires `dumpbin` support — not yet imp
 # Inspect an installed PyTorch ecosystem package by import name
 torch-abi-audit torchaudio
 
-# Inspect a path to an installed package or a single .so
+# Inspect a path to an installed package or a single .so / .pyd / .dll
 torch-abi-audit /path/to/site-packages/somepkg
 
 # Inspect every package in the current environment's site-packages
@@ -133,7 +137,7 @@ print(report.torch_verdict)             # "torch-stable" | "torch-unstable" | "n
 print(report.min_torch_version)         # e.g. "2.10.0", or None if no stable shims used
 
 # `extensions` holds Python extension modules; `bundled_libs` holds the
-# rest of the compiled .so files (libtorch_python.so, STABLE_TORCH_LIBRARY
+# rest of the compiled libraries (libtorch_python.so, STABLE_TORCH_LIBRARY
 # plugins, etc.). Both contribute to the verdict.
 for lib in (*report.extensions, *report.bundled_libs):
     print(lib.path, lib.torch.stable, lib.torch.min_torch_version, lib.cpython.compliant)

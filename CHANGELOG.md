@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+- Support Windows: PE/COFF import and export tables are parsed directly, so
+  `.pyd` extension modules and bundled `.dll` libraries (e.g.
+  `torch/lib/torch_cpu.dll`) are audited like their ELF and Mach-O
+  counterparts. `dumpbin` is used when it is on `PATH`, with the built-in
+  parser as the fallback, so no external tool is required.
+- Read symbol tables by the file's own format rather than the host platform, so
+  Windows wheels can be audited from Linux or macOS and vice versa.
+- Demangle MSVC C++ names (`?...`) in addition to Itanium ones.
+- Treat the import, delay-load and export directories independently: a damaged
+  table only costs its own names instead of hiding every reference in the
+  library.
+- Add Windows to the test matrix, building the C/C++ fixtures with MSVC (or a
+  GNU driver where that is all that exists) instead of assuming a Unix
+  toolchain. CI now fails when a runner has no discoverable compiler, rather
+  than silently skipping every fixture test.
+
 ## 0.3.0
 
 - Add `--check {torch,abi3,both}` for CI gating, with exit code 1 for ABI

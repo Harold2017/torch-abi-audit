@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
+from toolchain import (
+    ToolchainUnavailable,
+    build_extension,
+    extension_suffix,
+    find_toolchain,
+    library_suffix,
+)
 from torch_abi_audit import inspect_package
 from torch_abi_audit.report import PackageReport
 
@@ -18,32 +24,33 @@ def _build_bundled_lib(src_dir: Path, out: Path) -> None:
     src.write_text(
         "int bundled_call(int x) { return x + 1; }\n", encoding="utf-8"
     )
-    cc = shutil.which("cc") or shutil.which("gcc")
-    if cc is None:
+    toolchain = find_toolchain()
+    if toolchain is None:
         pytest.skip("no C compiler found")
-    proc = subprocess.run(
-        [cc, "-shared", "-fPIC", "-O0", "-o", str(out), str(src)],
-        capture_output=True, text=True, check=False,
-    )
-    if proc.returncode != 0:
-        pytest.skip(f"compile failed: {proc.stderr.strip()[:200]}")
+    try:
+        build_extension(
+            toolchain=toolchain, source=src, output=out, link_python=False
+        )
+    except ToolchainUnavailable as exc:
+        pytest.skip(str(exc))
 
 
 def test_inspect_package_splits_extensions_and_bundled(
     tmp_path: Path, cpython_unstable_so: Path
 ) -> None:
-    """A directory with one PyInit-bearing .so and one bundled lib should
+    """A directory with one PyInit-bearing library and one bundled lib should
     produce a one-of-each split."""
     pkg = tmp_path / "fakepkg"
     pkg.mkdir()
-    shutil.copy(cpython_unstable_so, pkg / "extension.cpython-311-x86_64-linux-gnu.so")
-    _build_bundled_lib(tmp_path, pkg / "libfake.so")
+    bundled_name = f"libfake{library_suffix()}"
+    shutil.copy(cpython_unstable_so, pkg / f"extension{extension_suffix()}")
+    _build_bundled_lib(tmp_path, pkg / bundled_name)
 
     report: PackageReport = inspect_package(pkg)
     assert len(report.extensions) == 1
     assert len(report.bundled_libs) == 1
     assert report.extensions[0].path.name.startswith("extension.")
-    assert report.bundled_libs[0].path.name == "libfake.so"
+    assert report.bundled_libs[0].path.name == bundled_name
     # Neither uses torch, so the package roll-up is no-torch even with the
     # bundled lib counted.
     assert report.torch_verdict == "no-torch"
