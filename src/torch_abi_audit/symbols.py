@@ -14,7 +14,10 @@ historical behaviour.
 
 Callers ask for the same library twice (once to classify it as an extension
 module, once to inspect it), so results are memoised on the stat signature —
-PE images shipped by torch reach hundreds of megabytes.
+PE images shipped by torch reach hundreds of megabytes. The cache key is the
+resolved path, because a relative path plus size and mtime does not identify a
+file: two directories can each hold a different, equally sized file that was
+written in the same timestamp tick.
 """
 
 from __future__ import annotations
@@ -29,8 +32,26 @@ from pathlib import Path
 from . import dumpbin, pe
 from .demangle import demangle_symbol
 
-#: Suffixes treated as compiled libraries, across the platforms we audit.
-LIBRARY_SUFFIXES = (".so", ".pyd", ".dylib", ".dll")
+#: Every format we know how to read, whichever platform we are running on.
+ALL_LIBRARY_SUFFIXES = (".so", ".pyd", ".dylib", ".dll")
+
+#: Formats of the host platform. Directory scans default to these so that
+#: auditing a tree on Linux or macOS keeps reporting exactly what it used to;
+#: the foreign formats need an explicit opt-in.
+NATIVE_LIBRARY_SUFFIXES = (
+    (".pyd", ".dll")
+    if sys.platform == "win32"
+    else (".so", ".pyd", ".dylib")
+)
+
+
+def library_suffixes(include_foreign: bool = False) -> tuple[str, ...]:
+    """Suffixes a directory scan should collect.
+
+    Read at call time, not import time, so the rule lives in one place and a
+    test can substitute a different host's defaults.
+    """
+    return ALL_LIBRARY_SUFFIXES if include_foreign else NATIVE_LIBRARY_SUFFIXES
 
 _ELF_MAGIC = b"\x7fELF"
 _MACHO_MAGICS = frozenset(
@@ -53,11 +74,20 @@ class BinarySymbols:
     ELF dynamic symbol table's undefined entries, or the PE import directory —
     already demangled. ``exports`` are the names the library defines, left
     undemangled: they are only used to spot Python module entry points, which
-    are plain C names.
+    are plain C names. ``libraries`` names the dependencies imports come from,
+    which is how a Windows Stable ABI extension is distinguished from one
+    pinned to a versioned ``python3XX.dll``. ``error`` means nothing could be
+    read; ``incomplete`` means some symbols were recovered but the table could
+    not be followed to its end.
     """
 
     imports: tuple[str, ...] = ()
     exports: tuple[str, ...] = ()
+    libraries: tuple[str, ...] = ()
+    #: Set when nothing could be read at all; verdicts are then placeholders.
+    error: str | None = None
+    #: Set when part of the table was unreadable but names were recovered.
+    incomplete: str | None = None
 
 
 def read_symbols(path: Path) -> BinarySymbols:
@@ -66,12 +96,12 @@ def read_symbols(path: Path) -> BinarySymbols:
     Empty when the file cannot be read, mirroring ``nm``'s leniency for files
     that aren't recognised object files.
     """
-    p = Path(path)
     try:
-        stat = p.stat()
+        resolved = Path(path).resolve()
+        stat = resolved.stat()
     except OSError:
         return BinarySymbols()
-    return _read_symbols_cached(str(p), stat.st_size, stat.st_mtime_ns)
+    return _read_symbols_cached(str(resolved), stat.st_size, stat.st_mtime_ns)
 
 
 @lru_cache(maxsize=64)
@@ -100,15 +130,27 @@ def _file_format(path: Path) -> str | None:
 
 
 def _read_pe(path: Path) -> BinarySymbols:
-    imports, exports = _pe_names(path)
+    tables = _pe_tables(path)
     return BinarySymbols(
-        imports=tuple(demangle_symbol(name) for name in imports),
-        exports=exports,
+        imports=tuple(demangle_symbol(name) for name in tables.imports),
+        exports=tables.exports,
+        libraries=tables.libraries,
+        error=tables.error,
+        incomplete=tables.incomplete,
     )
 
 
-def _pe_names(path: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Import and export names of one PE image.
+@dataclass(frozen=True, slots=True)
+class _PETables:
+    imports: tuple[str, ...] = ()
+    exports: tuple[str, ...] = ()
+    libraries: tuple[str, ...] = ()
+    error: str | None = None
+    incomplete: str | None = None
+
+
+def _pe_tables(path: Path) -> _PETables:
+    """Import and export data for one PE image.
 
     ``dumpbin`` wins when it is on PATH, mirroring the ``nm``-first behaviour on
     ELF/Mach-O; the built-in parser covers ordinary installs, where no Visual
@@ -122,22 +164,40 @@ def _pe_names(path: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """
     if dumpbin.find_dumpbin():
         try:
-            names = dumpbin.read_dumpbin(path)
+            tables = dumpbin.read_dumpbin(path)
         except (dumpbin.DumpbinError, OSError):
             pass
         else:
-            # Both tables must have parsed. A reworded dumpbin release (or a
+            # All three tables must have parsed. A reworded dumpbin release (or a
             # partially readable directory) can yield names for one table and
-            # nothing for the other; trusting that would silently demote an
+            # nothing for the rest; trusting that would silently demote an
             # extension module to a bundled library, because entry-point
-            # detection reads only ``exports``. Re-parsing costs milliseconds,
-            # and a genuinely export-less image gets the same answer either way.
-            if all(names):
-                return names
+            # detection reads only ``exports`` — and an empty ``libraries``
+            # would skip the ``python3XX.dll`` pinning check, making an
+            # abi3-tagged module look compliant. An image with imports always
+            # names at least one DLL, and the parser can recover names that
+            # dumpbin's heuristic misses, so re-parsing is cheap insurance.
+            if tables.imports and tables.exports and tables.libraries:
+                return _PETables(
+                    imports=tables.imports,
+                    exports=tables.exports,
+                    libraries=tables.libraries,
+                )
     try:
-        return pe.read_pe(path)
-    except (pe.PEFormatError, OSError):
-        return (), ()
+        data = pe.read_pe(path)
+    except (pe.PEFormatError, OSError) as exc:
+        return _PETables(error=f"PE parse failed: {exc}")
+    message = "; ".join(data.errors) or None
+    # Nothing recovered means the file is unusable; anything recovered means the
+    # verdict stands but the read was incomplete and must not look clean.
+    recovered = bool(data.imports or data.exports or data.libraries)
+    return _PETables(
+        imports=data.imports,
+        exports=data.exports,
+        libraries=data.libraries,
+        error=None if recovered else message,
+        incomplete=message if recovered else None,
+    )
 
 
 def _nm_command(path: Path) -> list[str]:
@@ -164,6 +224,8 @@ def _read_nm(path: Path) -> BinarySymbols:
     if not shutil.which("nm"):
         hint = "Xcode Command Line Tools" if sys.platform == "darwin" else "binutils"
         raise RuntimeError(f"'nm' not found in PATH (install {hint})")
+    # ELF/Mach-O dependency names are not read: the version-pinned-versus-stable
+    # DLL question is Windows-specific, and no other platform needs the answer.
     return BinarySymbols(imports=_nm_imports(path), exports=_nm_exports(path))
 
 
@@ -260,28 +322,42 @@ def is_extension_module(path: Path) -> bool:
     """
     if not path.is_file():
         return False
-    if not path.name.endswith(LIBRARY_SUFFIXES):
+    if not path.name.endswith(ALL_LIBRARY_SUFFIXES):
         return False
     return has_module_entrypoint(path)
 
 
-def find_compiled_libraries(directory: Path) -> list[Path]:
+def find_compiled_libraries(
+    directory: Path, *, include_foreign: bool = False
+) -> list[Path]:
     """Recursively find every compiled library under ``directory``.
 
-    Matches :data:`LIBRARY_SUFFIXES` — ``.so``, ``.pyd``, ``.dylib`` and
-    ``.dll``. Includes both Python extension modules and bundled internal shared
-    libraries (e.g. ``torch/lib/libtorch_cpu.so``,
-    ``torchcodec/libtorchcodec_core8.so``, ``torch/lib/torch_cpu.dll``) —
-    callers split the two via :func:`is_extension_module`.
+    By default only the host's formats are collected, so a scan on Linux or
+    macOS keeps returning exactly the files it always did. Passing
+    ``include_foreign`` adds the other platforms' formats — ``.dll`` on POSIX,
+    ``.so``/``.dylib`` on Windows — because the reader dispatches on the file's
+    own magic bytes and can audit a wheel built for another OS.
+
+    Includes both Python extension modules and bundled internal shared libraries
+    (e.g. ``torch/lib/libtorch_cpu.so``, ``torchcodec/lib/torchcodec_core8.so``,
+    ``torch/lib/torch_cpu.dll``) — callers split the two via
+    :func:`is_extension_module`.
     """
+    suffixes = library_suffixes(include_foreign)
     out: set[Path] = set()
-    for ext in ("*" + suffix for suffix in LIBRARY_SUFFIXES):
+    for ext in ("*" + suffix for suffix in suffixes):
         for p in directory.rglob(ext):
             if p.is_file():
                 out.add(p)
     return sorted(out)
 
 
-def find_extension_modules(directory: Path) -> list[Path]:
+def find_extension_modules(
+    directory: Path, *, include_foreign: bool = False
+) -> list[Path]:
     """Recursively find CPython extension modules under ``directory``."""
-    return [p for p in find_compiled_libraries(directory) if is_extension_module(p)]
+    return [
+        p
+        for p in find_compiled_libraries(directory, include_foreign=include_foreign)
+        if is_extension_module(p)
+    ]

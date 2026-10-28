@@ -90,6 +90,31 @@ def test_parse_imports_reads_regular_and_delay_blocks() -> None:
     )
 
 
+def test_parse_imports_reads_bound_delay_entries() -> None:
+    """A bound delay-load entry carries two address columns, not one.
+
+    Getting this wrong drops every bound entry silently — it undercounted
+    ``ReAgent.dll`` by 114 imports, which is the direction that hides usage.
+    """
+    text = (
+        "  Section contains the following delay load imports:\n"
+        "\n"
+        "    WIMGAPI.DLL\n"
+        "              00000001 Characteristics\n"
+        "      00000001800B4B50 Address of HMODULE\n"
+        "                     0 time date stamp\n"
+        "\n"
+        "                  0000000180003000  0000000180003000     C WIMCreateFile\n"
+        "                  0000000180003100  0000000180003100    48 WIMUnregisterMessageCallback\n"
+        "                  0000000180003BD0  0000000180003BD0       Ordinal     6\n"
+    )
+
+    assert dumpbin.parse_imports(text) == (
+        "WIMCreateFile",
+        "WIMUnregisterMessageCallback",
+    )
+
+
 def test_parse_imports_skips_ordinals_descriptors_and_summary() -> None:
     names = dumpbin.parse_imports(IMPORTS_TEXT)
     assert "Ordinal" not in names
@@ -102,6 +127,38 @@ def test_parse_exports_handles_plain_and_forwarded_entries() -> None:
         "PyInit_demo",
         "CLIPFORMAT_UserFree",
     )
+
+
+def test_parse_libraries_from_import_blocks() -> None:
+    """Dependency names, which the abi3 check needs and dumpbin prints as the
+    block header line."""
+    assert dumpbin.parse_libraries(IMPORTS_TEXT) == (
+        "api-ms-win-core-rtlsupport-l1-1-0.dll",
+        "WS2_32.dll",
+        "UIAutomationCore.DLL",
+    )
+
+
+def test_parse_libraries_keeps_names_without_a_dll_suffix() -> None:
+    """The built-in parser records whatever the descriptor names.
+
+    ``PeerDistSh.dll`` imports from ``NETSH.EXE``; requiring a ``.dll`` suffix
+    here would make the two backends disagree, and the dependency list now
+    gates a compliance decision.
+    """
+    text = (
+        "  Section contains the following imports:\n"
+        "\n"
+        "    NETSH.EXE\n"
+        "             18000E108 Import Address Table\n"
+        "\n"
+        "                           5 RtlCompareMemory\n"
+        "\n"
+        "  Summary\n"
+        "        1000 .data\n"
+    )
+
+    assert dumpbin.parse_libraries(text) == ("NETSH.EXE",)
 
 
 def test_parse_outputs_are_empty_for_unrecognised_text() -> None:
@@ -143,13 +200,19 @@ def test_uses_dumpbin_when_available(
     monkeypatch.setattr(
         dumpbin,
         "read_dumpbin",
-        lambda path: (("torch_call_dispatcher",), ("PyInit_from_dumpbin",)),
+        lambda path: dumpbin.DumpbinTables(
+            imports=("torch_call_dispatcher",),
+            exports=("PyInit_from_dumpbin",),
+            libraries=("python3.dll",),
+        ),
     )
 
     result = symbols._read_pe(pe_file)
 
     assert result.imports == ("torch_call_dispatcher",)
     assert result.exports == ("PyInit_from_dumpbin",)
+    # The dependency list comes from dumpbin too, so the abi3 check still works.
+    assert result.libraries == ("python3.dll",)
 
 
 def test_uses_parser_when_dumpbin_is_absent(
@@ -160,13 +223,13 @@ def test_uses_parser_when_dumpbin_is_absent(
     result = symbols._read_pe(pe_file)
 
     assert result.exports == ("PyInit_demo",)
-    assert tuple(pe.read_pe(pe_file)[0]) == result.imports
+    assert pe.read_pe(pe_file).imports == result.imports
 
 
 def test_falls_back_when_dumpbin_fails(
     monkeypatch: pytest.MonkeyPatch, pe_file: Path
 ) -> None:
-    def boom(path: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    def boom(path: Path) -> dumpbin.DumpbinTables:
         raise dumpbin.DumpbinError("nope")
 
     monkeypatch.setattr(dumpbin, "find_dumpbin", lambda: "dumpbin")
@@ -182,11 +245,35 @@ def test_falls_back_when_dumpbin_yields_nothing(
 ) -> None:
     """An empty dumpbin result is treated as a parse failure, not as a verdict."""
     monkeypatch.setattr(dumpbin, "find_dumpbin", lambda: "dumpbin")
-    monkeypatch.setattr(dumpbin, "read_dumpbin", lambda path: ((), ()))
+    monkeypatch.setattr(dumpbin, "read_dumpbin", lambda path: dumpbin.DumpbinTables())
 
     result = symbols._read_pe(pe_file)
 
     assert result.exports == ("PyInit_demo",)
+
+
+def test_falls_back_when_dumpbin_omits_the_dependency_list(
+    monkeypatch: pytest.MonkeyPatch, pe_file: Path
+) -> None:
+    """A missing dependency list would skip the ``python3XX.dll`` check.
+
+    That is the same fail-open the fallback exists to prevent, so the result is
+    only trusted when the libraries parsed as well.
+    """
+    monkeypatch.setattr(dumpbin, "find_dumpbin", lambda: "dumpbin")
+    monkeypatch.setattr(
+        dumpbin,
+        "read_dumpbin",
+        lambda path: dumpbin.DumpbinTables(
+            imports=("aoti_torch_get_dim",), exports=("PyInit_demo",), libraries=()
+        ),
+    )
+
+    result = symbols._read_pe(pe_file)
+
+    # Taken from the parser instead, which does report the dependency.
+    assert result.libraries == ("torch_cpu.dll",)
+    assert result.imports == ("aoti_torch_get_dim",)
 
 
 def test_falls_back_when_dumpbin_misses_one_table(
@@ -200,7 +287,9 @@ def test_falls_back_when_dumpbin_misses_one_table(
     """
     monkeypatch.setattr(dumpbin, "find_dumpbin", lambda: "dumpbin")
     monkeypatch.setattr(
-        dumpbin, "read_dumpbin", lambda path: (("aoti_torch_get_dim",), ())
+        dumpbin,
+        "read_dumpbin",
+        lambda path: dumpbin.DumpbinTables(imports=("aoti_torch_get_dim",)),
     )
 
     result = symbols._read_pe(pe_file)
@@ -213,4 +302,9 @@ def test_falls_back_when_dumpbin_misses_one_table(
     dumpbin.find_dumpbin() is None, reason="dumpbin is not on PATH"
 )
 def test_dumpbin_and_parser_agree_on_a_real_image(pe_file: Path) -> None:
-    assert dumpbin.read_dumpbin(pe_file) == pe.read_pe(pe_file)
+    real = dumpbin.read_dumpbin(pe_file)
+    ours = pe.read_pe(pe_file)
+
+    assert real.imports == ours.imports
+    assert real.exports == ours.exports
+    assert real.libraries == ours.libraries

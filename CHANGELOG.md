@@ -7,12 +7,20 @@
   `torch/lib/torch_cpu.dll`) are audited like their ELF and Mach-O
   counterparts. `dumpbin` is used when it is on `PATH`, with the built-in
   parser as the fallback, so no external tool is required.
+- Check the Python DLL a Windows extension links: a Stable ABI build must use
+  `python3.dll`, and one linked against a version-specific `python3XX.dll` is
+  reported as non-compliant even when all of its symbols are stable.
 - Read symbol tables by the file's own format rather than the host platform, so
-  Windows wheels can be audited from Linux or macOS and vice versa.
+  Windows wheels can be audited from Linux or macOS and vice versa. Directory
+  scans still collect only the same formats as previous releases; pass
+  `--all-platforms` to include the other platform's libraries too (a wheel
+  that ships both POSIX and Windows binaries is otherwise only partly
+  audited).
+- Keep the symbols recovered from a damaged table and report the partial read
+  as an inspection error (exit `2`), instead of discarding the whole directory
+  and quietly reporting the library as torch-free. Symbol names longer than
+  4096 characters are no longer treated as corruption.
 - Demangle MSVC C++ names (`?...`) in addition to Itanium ones.
-- Treat the import, delay-load and export directories independently: a damaged
-  table only costs its own names instead of hiding every reference in the
-  library.
 - Add Windows to the test matrix, building the C/C++ fixtures with MSVC (or a
   GNU driver where that is all that exists) instead of assuming a Unix
   toolchain. CI now fails when a runner has no discoverable compiler, rather

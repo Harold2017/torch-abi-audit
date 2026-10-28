@@ -67,8 +67,10 @@ built-in parser, so no extra tooling is needed. `dumpbin` is used when it is on
 `PATH` — which only happens inside a Visual Studio developer prompt — and is
 never required.
 
-Any platform's binaries can be audited from any host, so a `win_amd64` wheel can
-be inspected on Linux.
+Any platform's binaries can be audited from any host: pass `--all-platforms`
+to a directory scan to include them. Without it a scan collects the same
+formats as previous releases, so a wheel shipping both POSIX and Windows
+libraries is only partly audited.
 
 ## Quick tour
 
@@ -104,7 +106,9 @@ stable surface, and as `UNSTABLE` if any `c10::*`, `at::*`, or non-stable
 2. Read the undefined symbols: `nm -uD` on Linux, `nm -u` on macOS, or the PE
    import directory on Windows (`dumpbin` when it is on `PATH`, otherwise the
    built-in parser). The format is detected from the file itself, not the host,
-   so cross-platform wheels audit correctly anywhere.
+   so cross-platform wheels audit correctly anywhere. On Windows the imported
+   DLL names are checked too, since a Stable ABI extension must link
+   `python3.dll` rather than a version-specific `python3XX.dll`.
 3. Demangle C++ names via [pycxxfilt](https://pypi.org/project/pycxxfilt/).
 4. Classify each symbol against two rule sets — the CPython stable-ABI
    symbol set from [abi3info](https://pypi.org/project/abi3info/) and the

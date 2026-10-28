@@ -46,6 +46,36 @@ class PEBuilder:
         self.imports: list[tuple[str, str | None]] = []
         #: ``(dll, name, rva_based)``.
         self.delay_imports: list[tuple[str, str, bool]] = []
+        #: RVAs of each import group's thunk array, in descriptor order. Reset
+        #: by :meth:`build`, so they always describe the most recent image.
+        self.thunk_rvas: list[int] = []
+        #: RVAs of each delay-load group's thunk array, likewise per build.
+        self.delay_thunk_rvas: list[int] = []
+        #: File offsets of each import descriptor, for damaging individual ones.
+        self.import_descriptor_offsets: list[int] = []
+
+    def file_offset(self, rva: int) -> int:
+        """File offset of ``rva`` in these single-section images."""
+        return rva - _SECTION_RVA + _RAW_POINTER
+
+    def thunk_entry_offset(self, group: int, entry: int) -> int:
+        """File offset of one thunk entry, for tests that damage the table."""
+        width = 8 if self.pe32_plus else 4
+        return self.file_offset(self.thunk_rvas[group]) + entry * width
+
+    def delay_thunk_entry_offset(self, group: int, entry: int) -> int:
+        """File offset of one delay-load thunk entry, for damage-based tests."""
+        width = 8 if self.pe32_plus else 4
+        return self.file_offset(self.delay_thunk_rvas[group]) + entry * width
+
+    def import_descriptor_offset(self, group: int, field: str) -> int:
+        """File offset of one field of an import descriptor.
+
+        ``field`` is ``"thunk"`` (OriginalFirstThunk) or ``"name"`` (the DLL
+        name RVA), the two the tests damage.
+        """
+        offsets = {"thunk": 0, "name": 12}
+        return self.import_descriptor_offsets[group] + offsets[field]
 
     # -- authoring ---------------------------------------------------------
 
@@ -66,6 +96,11 @@ class PEBuilder:
     # -- assembly ----------------------------------------------------------
 
     def build(self) -> bytes:
+        # Reset the recorded layouts: building twice (e.g. build, add_import,
+        # build again) must not leave the earlier image's offsets at index 0.
+        self.thunk_rvas.clear()
+        self.delay_thunk_rvas.clear()
+        self.import_descriptor_offsets.clear()
         section = bytearray()
         export_dir = _reserve(section, 40) if self.exports else None
         groups = self._grouped_imports()
@@ -143,6 +178,8 @@ class PEBuilder:
             thunks = [self._import_thunk(section, name) for name in names]
             _align(section, 8 if self.pe32_plus else 4)
             thunk_rva = self._write_thunks(section, thunks)
+            self.thunk_rvas.append(thunk_rva)
+            self.import_descriptor_offsets.append(_RAW_POINTER + at + 20 * index)
             struct.pack_into(
                 "<IIIII",
                 section,
@@ -160,6 +197,7 @@ class PEBuilder:
             thunk = self._import_thunk(section, name)
             _align(section, 8 if self.pe32_plus else 4)
             thunk_rva = self._write_thunks(section, [thunk])
+            self.delay_thunk_rvas.append(thunk_rva)
             base = 0 if rva_based else _IMAGE_BASE[self.pe32_plus]
             struct.pack_into(
                 "<8I",

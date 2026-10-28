@@ -6,8 +6,8 @@ icon: lucide/terminal
 
 ```text
 usage: torch-abi-audit [-h] [--version] [--env | --site-packages PATH]
-                       [--json] [--all] [-v] [--check POLICY]
-                       [TARGET ...]
+                       [--json] [--all] [--all-platforms] [-v]
+                       [--check POLICY] [TARGET ...]
 ```
 
 ## Modes
@@ -36,6 +36,12 @@ By default the CLI prints a human-readable table.
   extensions.
 - `--all` makes env-scan output include packages with no torch use (hidden
   by default to keep the table focused on potentially-problematic packages).
+- `--all-platforms` makes directory scans also pick up libraries built for a
+  different platform (`.dll` on Linux or macOS, `.so`/`.dylib` on Windows).
+  Without it a scan collects the same formats as previous releases, which on
+  POSIX still includes `.pyd` — a Windows format — so a wheel shipping both
+  POSIX and Windows binaries is audited only partly unless you opt in. A file
+  named directly on the command line is always inspected.
 
 Package headers carry a `Min torch:` line, mirrored by the env-scan
 `MIN-TORCH` column: the lowest torch release that supplies every stable shim symbol the
@@ -267,6 +273,11 @@ via `STABLE_TORCH_LIBRARY` (e.g. `torchaudio`) has no CPython ABI verdict, so
 `abi3` / `both` never flag it -- the CPython limited API applies only to
 modules loaded by Python's importer, not to `dlopen`-ed shared libraries.
 
+On Windows the check also requires the module to link `python3.dll`, the
+version-agnostic stable ABI forwarder. A module that links `python314.dll`
+(and friends) is tied to one interpreter version even when every symbol it
+uses is stable, so it fails `abi3`.
+
 ```bash
 torch-abi-audit mypkg --check torch          # gate one package
 torch-abi-audit --env --check both           # gate the whole environment
@@ -283,7 +294,10 @@ The CLI reports verdicts via stdout / JSON; it returns:
 - `1` when `--check` is given and a policy violation is found.
 - `2` on operational errors (missing `nm`, unknown import name, unreadable
   path, or a library that fails to parse) -- whether the failure is raised or
-  recorded in a report's `error` field.
+  recorded in a report's `error` field. A **partly** readable library counts:
+  the verdict is computed from the symbols that were recovered and reported as
+  normal, but the run still exits `2`, because an audit that could not see
+  every symbol must not report success.
 
 Without `--check`, the tool is safe to run interactively without `set -e`
 surprises: it only exits non-zero on operational errors. As an alternative to

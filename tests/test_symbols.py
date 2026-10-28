@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from toolchain import extension_suffix
 from torch_abi_audit import inspect_package
 from torch_abi_audit.symbols import (
     extract_undefined_symbols,
@@ -52,7 +53,7 @@ def test_pymodexport_package_classification(
     defined: bool,
 ):
     """Only a defined export hook makes a library a Python extension."""
-    library = tmp_path / "example.so"
+    library = tmp_path / f"example{extension_suffix()}"
     library.touch()
     symbol = f"{prefix}example"
 
