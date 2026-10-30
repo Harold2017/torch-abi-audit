@@ -177,10 +177,10 @@ def test_extension_detection_uses_export_table(tmp_path: Path) -> None:
 
 
 def test_find_compiled_libraries_scopes_by_platform(tmp_path: Path) -> None:
-    """A scan only picks up the host's formats unless asked for more.
+    """A scan collects the host's formats, and only those.
 
-    Native discovery must not change on Linux/macOS just because the tool also
-    understands PE; auditing a wheel built for another OS is opt-in.
+    POSIX keeps the set it has always used, so adding a Windows DLL to a tree
+    cannot change its verdict; Windows adds ``.dll`` next to ``.pyd``.
     """
     pkg = tmp_path / "pkg"
     write_pe(pkg / "a.dll", PEBuilder())
@@ -188,42 +188,38 @@ def test_find_compiled_libraries_scopes_by_platform(tmp_path: Path) -> None:
     # Linker import libraries are archives, not PE images; they must not match.
     (pkg / "c.lib").write_bytes(b"!<arch>\n")
 
-    assert {p.name for p in find_compiled_libraries(pkg, include_foreign=True)} == {
-        "a.dll",
-        "b.pyd",
-    }
+    found = {p.name for p in find_compiled_libraries(pkg)}
     if sys.platform == "win32":
-        assert {p.name for p in find_compiled_libraries(pkg)} == {"a.dll", "b.pyd"}
+        assert found == {"a.dll", "b.pyd"}
     else:
-        # .dll is a foreign format on POSIX and needs the opt-in.
-        assert {p.name for p in find_compiled_libraries(pkg)} == {"b.pyd"}
+        assert found == {"b.pyd"}
 
 
-def test_posix_scan_ignores_dll_by_default(
+def test_posix_scan_ignores_dll(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The Linux/macOS default must not change just because PE is supported.
+    """The Linux/macOS discovery rule must not change just because PE works.
 
     Reproduces the review case: a directory that gains a Windows DLL keeps its
-    verdict, because the DLL is not part of a native scan.
+    verdict, because the DLL is not part of a scan on this host. Naming the file
+    explicitly still inspects it.
     """
     from torch_abi_audit import symbols
 
-    monkeypatch.setattr(
-        symbols, "NATIVE_LIBRARY_SUFFIXES", (".so", ".pyd", ".dylib")
-    )
+    monkeypatch.setattr(symbols, "LIBRARY_SUFFIXES", (".so", ".pyd", ".dylib"))
     pkg = tmp_path / "pkg"
-    write_pe(
+    dll = write_pe(
         pkg / "libunstable.dll",
         PEBuilder().add_import("torch_cpu.dll", AT_TENSOR_NUMEL),
     )
 
     assert find_compiled_libraries(pkg) == []
     assert inspect_package(pkg).torch_verdict == "no-torch"
-    # Opting in surfaces it, with the verdict the file actually carries.
-    opted_in = inspect_package(pkg, include_foreign=True)
-    assert [b.path.name for b in opted_in.bundled_libs] == ["libunstable.dll"]
-    assert opted_in.torch_verdict == "torch-unstable"
+
+    # A path target is inspected whatever platform built the file.
+    by_path = inspect_package(dll)
+    assert [b.path.name for b in by_path.bundled_libs] == ["libunstable.dll"]
+    assert by_path.torch_verdict == "torch-unstable"
 
 
 # The builder lays the single section out right after the 0x200-byte headers and
@@ -454,31 +450,37 @@ def test_version_pinned_dll_fails_the_abi3_gate(
     assert "demo.abi3.pyd" in capsys.readouterr().err
 
 
-def test_site_packages_top_level_file_honours_include_foreign(
+def test_site_packages_top_level_file_uses_the_scan_rule(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A library at the directory root follows the same rule as one in a package.
 
-    Otherwise the same ``.dll`` is skipped inside ``pkg/`` but audited when it
-    happens to sit next to it, so the flag's effect depends on layout.
+    Otherwise the same file is skipped inside ``pkg/`` but audited when it
+    happens to sit next to it, so the scan result depends on layout.
     """
     from torch_abi_audit import symbols
 
-    monkeypatch.setattr(
-        symbols, "NATIVE_LIBRARY_SUFFIXES", (".so", ".pyd", ".dylib")
-    )
+    monkeypatch.setattr(symbols, "LIBRARY_SUFFIXES", (".so", ".pyd", ".dylib"))
     site_packages = tmp_path / "site-packages"
     write_pe(
         site_packages / "stray.dll",
         PEBuilder().add_import("torch_cpu.dll", AT_TENSOR_NUMEL),
     )
-
     assert inspect_site_packages(site_packages).packages == ()
-    opted_in = inspect_site_packages(site_packages, include_foreign=True)
-    assert [p.name for p in opted_in.packages] == ["stray.dll"]
+
+    monkeypatch.setattr(symbols, "LIBRARY_SUFFIXES", (".pyd", ".dll"))
+    assert [p.name for p in inspect_site_packages(site_packages).packages] == [
+        "stray.dll"
+    ]
 
 
-def test_inspect_package_classifies_windows_libraries(tmp_path: Path) -> None:
+def test_inspect_package_classifies_windows_libraries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Extension vs bundled-library classification for PE files, on any host."""
+    from torch_abi_audit import symbols
+
+    monkeypatch.setattr(symbols, "LIBRARY_SUFFIXES", (".pyd", ".dll"))
     write_pe(
         tmp_path / "_demo.pyd",
         PEBuilder()
@@ -491,7 +493,7 @@ def test_inspect_package_classifies_windows_libraries(tmp_path: Path) -> None:
         PEBuilder().add_import("torch_cpu.dll", AOTI_GET_DIM),
     )
 
-    report = inspect_package(tmp_path, include_foreign=True)
+    report = inspect_package(tmp_path)
 
     assert [e.path.name for e in report.extensions] == ["_demo.pyd"]
     assert [b.path.name for b in report.bundled_libs] == ["libaoti.dll"]

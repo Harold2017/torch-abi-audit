@@ -28,9 +28,11 @@ pip install torch-abi-audit
 
 Linux, macOS and Windows. On Windows the PE import/export tables are read by a
 built-in parser, so nothing extra is needed; `dumpbin` is used when it happens
-to be on `PATH` (inside a Visual Studio developer prompt). Any platform's
-binaries can be audited from any host — a `win_amd64` wheel can be checked on
-Linux, for example.
+to be on `PATH` (inside a Visual Studio developer prompt). Directory scans
+collect the host's library formats — `.so`/`.pyd`/`.dylib` on Linux and macOS,
+`.pyd`/`.dll` on Windows — and because the PE parser is self-contained, a
+Windows binary named explicitly on the command line can also be inspected from
+Linux or macOS.
 
 ## CLI usage
 

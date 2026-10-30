@@ -6,8 +6,8 @@ icon: lucide/terminal
 
 ```text
 usage: torch-abi-audit [-h] [--version] [--env | --site-packages PATH]
-                       [--json] [--all] [--all-platforms] [-v]
-                       [--check POLICY] [TARGET ...]
+                       [--json] [--all] [-v] [--check POLICY]
+                       [TARGET ...]
 ```
 
 ## Modes
@@ -36,12 +36,12 @@ By default the CLI prints a human-readable table.
   extensions.
 - `--all` makes env-scan output include packages with no torch use (hidden
   by default to keep the table focused on potentially-problematic packages).
-- `--all-platforms` makes directory scans also pick up libraries built for a
-  different platform (`.dll` on Linux or macOS, `.so`/`.dylib` on Windows).
-  Without it a scan collects the same formats as previous releases, which on
-  POSIX still includes `.pyd` — a Windows format — so a wheel shipping both
-  POSIX and Windows binaries is audited only partly unless you opt in. A file
-  named directly on the command line is always inspected.
+
+Directory scans collect the library formats of the host: `.so` / `.pyd` /
+`.dylib` on Linux and macOS, `.pyd` / `.dll` on Windows. A file named directly
+on the command line is inspected whatever platform built it, so a Windows
+binary can be checked from Linux or macOS — that path uses the built-in PE
+parser and needs no external tools.
 
 Package headers carry a `Min torch:` line, mirrored by the env-scan
 `MIN-TORCH` column: the lowest torch release that supplies every stable shim symbol the

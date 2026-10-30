@@ -67,10 +67,11 @@ built-in parser, so no extra tooling is needed. `dumpbin` is used when it is on
 `PATH` — which only happens inside a Visual Studio developer prompt — and is
 never required.
 
-Any platform's binaries can be audited from any host: pass `--all-platforms`
-to a directory scan to include them. Without it a scan collects the same
-formats as previous releases, so a wheel shipping both POSIX and Windows
-libraries is only partly audited.
+Directory scans collect the library formats of the host: `.so` / `.pyd` /
+`.dylib` on Linux and macOS, `.pyd` / `.dll` on Windows. Because the PE parser
+is self-contained, a Windows binary can also be inspected from Linux or macOS
+by naming it explicitly. ELF and Mach-O inspection still runs the host's `nm`,
+so that narrower case is the only cross-platform reading this tool supports.
 
 ## Quick tour
 
@@ -95,8 +96,8 @@ stable surface, and as `UNSTABLE` if any `c10::*`, `at::*`, or non-stable
 
 ## How it works
 
-1. Walk the target directory and collect every `.so` / `.pyd` / `.dylib` /
-   `.dll`.
+1. Walk the target directory and collect the host's compiled libraries —
+   `.so` / `.pyd` / `.dylib` on Linux and macOS, `.pyd` / `.dll` on Windows.
    Bucket each by whether it defines a `PyInit_*` symbol — Python extension
    modules go under `extensions`, internal bundled libraries (e.g.
    `torch/lib/libtorch_python.so`, `torch/lib/torch_cpu.dll`, or torchaudio's
@@ -105,10 +106,9 @@ stable surface, and as `UNSTABLE` if any `c10::*`, `at::*`, or non-stable
    toward the CPython ABI verdict.
 2. Read the undefined symbols: `nm -uD` on Linux, `nm -u` on macOS, or the PE
    import directory on Windows (`dumpbin` when it is on `PATH`, otherwise the
-   built-in parser). The format is detected from the file itself, not the host,
-   so cross-platform wheels audit correctly anywhere. On Windows the imported
-   DLL names are checked too, since a Stable ABI extension must link
-   `python3.dll` rather than a version-specific `python3XX.dll`.
+   built-in parser). On Windows the imported DLL names are checked too, since a
+   Stable ABI extension must link `python3.dll` rather than a version-specific
+   `python3XX.dll`.
 3. Demangle C++ names via [pycxxfilt](https://pypi.org/project/pycxxfilt/).
 4. Classify each symbol against two rule sets — the CPython stable-ABI
    symbol set from [abi3info](https://pypi.org/project/abi3info/) and the

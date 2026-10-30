@@ -12,7 +12,7 @@ from .symbols import (
     ALL_LIBRARY_SUFFIXES,
     find_compiled_libraries,
     is_extension_module,
-    library_suffixes,
+    is_scannable_library,
     read_symbols,
 )
 
@@ -59,14 +59,13 @@ def _resolve_import_name(name: str) -> Path:
     raise FileNotFoundError(f"{name!r} has no filesystem location")
 
 
-def inspect_package(
-    name_or_path: str | Path, *, include_foreign: bool = False
-) -> PackageReport:
+def inspect_package(name_or_path: str | Path) -> PackageReport:
     """Inspect an installed package by import name, or a path to a file/directory.
 
-    ``include_foreign`` also audits libraries built for another platform (e.g.
-    Windows ``.dll`` files under a package on Linux). It applies to directory
-    scans only; a file named explicitly is always inspected.
+    A directory scan collects the current host's library formats. A file named
+    explicitly is inspected whatever platform built it, so a Windows
+    ``.pyd``/``.dll`` can be checked from Linux or macOS; that relies on the
+    built-in PE parser, not on cross-platform tooling.
     """
     target: Path
     name: str
@@ -106,18 +105,18 @@ def inspect_package(
             return PackageReport(name=name, root=target.parent, extensions=(report,))
         return PackageReport(name=name, root=target.parent, bundled_libs=(report,))
 
-    extensions, bundled = _split_libraries(target, include_foreign=include_foreign)
+    extensions, bundled = _split_libraries(target)
     return PackageReport(
         name=name, root=target, extensions=extensions, bundled_libs=bundled
     )
 
 
 def _split_libraries(
-    directory: Path, *, include_foreign: bool = False
+    directory: Path,
 ) -> tuple[tuple[ExtensionReport, ...], tuple[ExtensionReport, ...]]:
     extensions: list[ExtensionReport] = []
     bundled: list[ExtensionReport] = []
-    for p in find_compiled_libraries(directory, include_foreign=include_foreign):
+    for p in find_compiled_libraries(directory):
         report = inspect_extension(p)
         (extensions if is_extension_module(p) else bundled).append(report)
     return tuple(extensions), tuple(bundled)
@@ -127,26 +126,18 @@ def _default_site_packages() -> Path:
     return Path(sysconfig.get_paths()["purelib"])
 
 
-def inspect_site_packages(
-    directory: Path | None = None, *, include_foreign: bool = False
-) -> EnvironmentReport:
+def inspect_site_packages(directory: Path | None = None) -> EnvironmentReport:
     """Inspect every package in a site-packages directory."""
     sp = Path(directory).resolve() if directory else _default_site_packages()
     if not sp.is_dir():
         raise NotADirectoryError(f"not a directory: {sp}")
-
-    # The same suffix rule as a package scan, so a library sitting at the
-    # top level of the directory is treated exactly like one inside a package.
-    suffixes = library_suffixes(include_foreign)
 
     packages: list[PackageReport] = []
     for entry in sorted(sp.iterdir()):
         if entry.name in _SKIP_NAMES or entry.name.endswith(_SKIP_SUFFIXES):
             continue
         if entry.is_dir():
-            extensions, bundled = _split_libraries(
-                entry, include_foreign=include_foreign
-            )
+            extensions, bundled = _split_libraries(entry)
             if not extensions and not bundled:
                 continue
             packages.append(
@@ -157,7 +148,7 @@ def inspect_site_packages(
                     bundled_libs=bundled,
                 )
             )
-        elif entry.is_file() and entry.name.endswith(suffixes):
+        elif entry.is_file() and is_scannable_library(entry):
             report = inspect_extension(entry)
             if is_extension_module(entry):
                 packages.append(

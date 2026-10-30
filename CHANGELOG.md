@@ -5,17 +5,17 @@
 - Support Windows: PE/COFF import and export tables are parsed directly, so
   `.pyd` extension modules and bundled `.dll` libraries (e.g.
   `torch/lib/torch_cpu.dll`) are audited like their ELF and Mach-O
-  counterparts. `dumpbin` is used when it is on `PATH`, with the built-in
-  parser as the fallback, so no external tool is required.
+  counterparts. Directory scans collect `.pyd`/`.dll` on Windows and keep
+  their existing `.so`/`.pyd`/`.dylib` set on Linux and macOS. `dumpbin` is
+  used when it is on `PATH`, with the built-in parser as the fallback, so no
+  external tool is required.
 - Check the Python DLL a Windows extension links: a Stable ABI build must use
   `python3.dll`, and one linked against a version-specific `python3XX.dll` is
   reported as non-compliant even when all of its symbols are stable.
-- Read symbol tables by the file's own format rather than the host platform, so
-  Windows wheels can be audited from Linux or macOS and vice versa. Directory
-  scans still collect only the same formats as previous releases; pass
-  `--all-platforms` to include the other platform's libraries too (a wheel
-  that ships both POSIX and Windows binaries is otherwise only partly
-  audited).
+- Inspect a Windows binary by path on any host. The built-in PE parser is
+  self-contained, so a `.pyd`/`.dll` named explicitly is read from Linux or
+  macOS too; ELF and Mach-O inspection still relies on the host's `nm`, so this
+  is not a general cross-platform scan.
 - Keep the symbols recovered from a damaged table and report the partial read
   as an inspection error (exit `2`), instead of discarding the whole directory
   and quietly reporting the library as torch-free. Symbol names longer than

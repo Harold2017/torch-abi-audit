@@ -76,17 +76,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
     p.add_argument(
-        "--all-platforms",
-        action="store_true",
-        help=(
-            "In directory scans, also include libraries built for another "
-            "platform (e.g. .dll files on Linux). Without it a scan collects "
-            "the same formats as previous releases, so a package shipping both "
-            "POSIX and Windows binaries is audited only partially — a file "
-            "named directly on the command line is always inspected."
-        ),
-    )
-    p.add_argument(
         "--all",
         action="store_true",
         help="In env/site-packages mode, also list packages that don't reference torch.",
@@ -118,12 +107,9 @@ def _run_env_mode(
     show_all: bool,
     verbose: bool,
     check: CheckPolicy | None,
-    include_foreign: bool = False,
 ) -> int:
     try:
-        report = inspect_site_packages(
-            site_packages, include_foreign=include_foreign
-        )
+        report = inspect_site_packages(site_packages)
     except (NotADirectoryError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -139,13 +125,12 @@ def _run_target_mode(
     json_out: bool,
     verbose: bool,
     check: CheckPolicy | None,
-    include_foreign: bool = False,
 ) -> int:
     reports: list[PackageReport] = []
     rc = 0
     for t in targets:
         try:
-            reports.append(inspect_package(t, include_foreign=include_foreign))
+            reports.append(inspect_package(t))
         except RuntimeError as exc:
             print(f"error inspecting {t}: {exc}", file=sys.stderr)
             rc = 2
@@ -177,12 +162,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.env or args.site_packages:
         sp = Path(args.site_packages).resolve() if args.site_packages else None
-        return _run_env_mode(
-            sp, args.json, args.all, args.verbose, args.check, args.all_platforms
-        )
-    return _run_target_mode(
-        args.targets, args.json, args.verbose, args.check, args.all_platforms
-    )
+        return _run_env_mode(sp, args.json, args.all, args.verbose, args.check)
+    return _run_target_mode(args.targets, args.json, args.verbose, args.check)
 
 
 if __name__ == "__main__":

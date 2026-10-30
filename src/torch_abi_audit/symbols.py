@@ -32,26 +32,20 @@ from pathlib import Path
 from . import dumpbin, pe
 from .demangle import demangle_symbol
 
-#: Every format we know how to read, whichever platform we are running on.
+#: Every format the reader understands. Only used for a file the user names
+#: explicitly: the built-in PE parser is portable, so a Windows ``.pyd``/``.dll``
+#: can be inspected by path on any host. ELF and Mach-O still depend on the
+#: host's ``nm``, so this is not a cross-platform scan capability.
 ALL_LIBRARY_SUFFIXES = (".so", ".pyd", ".dylib", ".dll")
 
-#: Formats of the host platform. Directory scans default to these so that
-#: auditing a tree on Linux or macOS keeps reporting exactly what it used to;
-#: the foreign formats need an explicit opt-in.
-NATIVE_LIBRARY_SUFFIXES = (
+#: Formats a directory scan collects on this host. POSIX keeps the set it has
+#: always used; Windows adds ``.dll`` because that is where its bundled libraries
+#: live (``torch/lib/torch_cpu.dll``) alongside ``.pyd`` extension modules.
+LIBRARY_SUFFIXES = (
     (".pyd", ".dll")
     if sys.platform == "win32"
     else (".so", ".pyd", ".dylib")
 )
-
-
-def library_suffixes(include_foreign: bool = False) -> tuple[str, ...]:
-    """Suffixes a directory scan should collect.
-
-    Read at call time, not import time, so the rule lives in one place and a
-    test can substitute a different host's defaults.
-    """
-    return ALL_LIBRARY_SUFFIXES if include_foreign else NATIVE_LIBRARY_SUFFIXES
 
 _ELF_MAGIC = b"\x7fELF"
 _MACHO_MAGICS = frozenset(
@@ -327,37 +321,33 @@ def is_extension_module(path: Path) -> bool:
     return has_module_entrypoint(path)
 
 
-def find_compiled_libraries(
-    directory: Path, *, include_foreign: bool = False
-) -> list[Path]:
+def is_scannable_library(path: Path) -> bool:
+    """True if a directory scan on this host would collect ``path``.
+
+    Reads :data:`LIBRARY_SUFFIXES` at call time, so the rule a package scan and
+    the site-packages top-level check apply cannot drift apart.
+    """
+    return path.name.endswith(LIBRARY_SUFFIXES)
+
+
+def find_compiled_libraries(directory: Path) -> list[Path]:
     """Recursively find every compiled library under ``directory``.
 
-    By default only the host's formats are collected, so a scan on Linux or
-    macOS keeps returning exactly the files it always did. Passing
-    ``include_foreign`` adds the other platforms' formats — ``.dll`` on POSIX,
-    ``.so``/``.dylib`` on Windows — because the reader dispatches on the file's
-    own magic bytes and can audit a wheel built for another OS.
-
-    Includes both Python extension modules and bundled internal shared libraries
-    (e.g. ``torch/lib/libtorch_cpu.so``, ``torchcodec/lib/torchcodec_core8.so``,
-    ``torch/lib/torch_cpu.dll``) — callers split the two via
-    :func:`is_extension_module`.
+    Collects :data:`LIBRARY_SUFFIXES`, so a scan returns the formats this host
+    actually uses — ``.so``/``.pyd``/``.dylib`` on POSIX, ``.pyd``/``.dll`` on
+    Windows. Includes both Python extension modules and bundled internal shared
+    libraries (e.g. ``torch/lib/libtorch_cpu.so``,
+    ``torchcodec/lib/torchcodec_core8.so``, ``torch/lib/torch_cpu.dll``) —
+    callers split the two via :func:`is_extension_module`.
     """
-    suffixes = library_suffixes(include_foreign)
     out: set[Path] = set()
-    for ext in ("*" + suffix for suffix in suffixes):
+    for ext in ("*" + suffix for suffix in LIBRARY_SUFFIXES):
         for p in directory.rglob(ext):
             if p.is_file():
                 out.add(p)
     return sorted(out)
 
 
-def find_extension_modules(
-    directory: Path, *, include_foreign: bool = False
-) -> list[Path]:
+def find_extension_modules(directory: Path) -> list[Path]:
     """Recursively find CPython extension modules under ``directory``."""
-    return [
-        p
-        for p in find_compiled_libraries(directory, include_foreign=include_foreign)
-        if is_extension_module(p)
-    ]
+    return [p for p in find_compiled_libraries(directory) if is_extension_module(p)]
